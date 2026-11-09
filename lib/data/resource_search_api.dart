@@ -67,7 +67,7 @@ class HttpResourceSearchApi
   }
   static const buildUrl = String.fromEnvironment(
     'RESOURCE_SEARCH_URL',
-    defaultValue: BackendEndpoints.search,
+    defaultValue: '',
   );
   final JsonHttp http;
   final String endpoint;

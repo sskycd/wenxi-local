@@ -1,0 +1,114 @@
+# 安卓社区版构建（长期密钥，可覆盖安装）
+#
+# 签名完全走上游自己的链路，不自造：
+#   1) python tool/prepare-ci-release.py --android
+#      从四个 Secret 还原 .local/ci-release.jks 并写 .local/keystore.properties
+#      （含密码转义），同时把 config/build.community.json 合成 .local/build-config.json。
+#   2) ./tool/build-android.ps1  不带 -Unsigned、不带参数：
+#      android/app/build.gradle.kts 的 signingConfigs.release 读 .local/keystore.properties，
+#      enableV1Signing/V2/V3 全开，由 Gradle 完成签名。
+#   3) python tool/verify_apk.py 不带 --unsigned：
+#      会强制校验 v2/v3 签名，签名不对直接失败。
+#
+# 故意不做的：
+#   - 不设 ASTERLINK_CONTROL_URL / UMENG_APPKEY / ASTERLINK_CLIENT_DEFINES_JSON，
+#     走社区配置，远程地址留空、控制开关关。
+#   - 不用 release.yml（它硬性要求上面那些变量，缺了直接抛错）。
+#
+# 需要四个 Secret：
+#   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD /
+#   ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
+
+name: 安卓社区版
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-community-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      PUB_HOSTED_URL: https://pub.dev
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GOPROXY: https://proxy.golang.org,direct
+      GOTOOLCHAIN: go1.24.7
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          android: 'true'
+          windows-arm64: 'false'
+
+      - name: 准备签名文件（走上游脚本）
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ASTERLINK_APPLICATION_ID: com.asterlink.app.community
+          UMENG_CHANNEL: community
+        run: python tool/prepare-ci-release.py --android
+
+      - name: 安装固定版本安卓 SDK
+        run: |
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
+          & $sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          if ($LASTEXITCODE -ne 0) { throw '安卓 SDK 安装失败。' }
+
+      - name: 编译签名版 APK
+        run: ./tool/build-android.ps1
+
+      - name: 校验 APK（含 v2/v3 签名）
+        run: |
+          $settings = Get-Content -LiteralPath .local/build-config.json -Raw | ConvertFrom-Json
+          python tool/verify_apk.py `
+            --apk build/app/outputs/flutter-apk/app-release.apk `
+            --sdk $env:ANDROID_HOME `
+            --application-id $settings.applicationId `
+            --umeng-channel $settings.metricsChannel `
+            --output .local/release-apk-inspection.json
+          if ($LASTEXITCODE -ne 0) { throw 'APK 校验失败。' }
+
+      - name: 记录 APK 信息
+        run: |
+          $apk = 'build/app/outputs/flutter-apk/app-release.apk'
+          $h = Get-FileHash -Algorithm SHA256 $apk
+          Write-Output "APK 大小: $((Get-Item $apk).Length) 字节"
+          Write-Output "APK SHA256: $($h.Hash)"
+          "$($h.Hash)  app-release.apk" | Set-Content -LiteralPath .local/apk-sha256.txt -Encoding ascii
+
+      - name: 清除临时签名文件
+        if: always()
+        run: |
+          foreach ($p in @('.local/ci-release.jks', '.local/keystore.properties')) {
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
+          }
+
+      - name: 上传产物
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-community
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            .local/release-apk-inspection.json
+            .local/apk-sha256.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

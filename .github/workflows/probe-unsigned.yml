@@ -1,0 +1,100 @@
+# 探路构建：完全照抄上游 ci.yml 的安卓部分，只多一步上传 APK。
+# 目的：先验证 fork 里的环境、Flutter SDK、Go 原生库、无签名 APK 都能编出来。
+# 不签名 —— 上游原样就不签名，这一步只证明链路通。
+#
+# 依据（data/wenxi/upstream-wf/ci.yml，已解码核对）：
+#   - runner: windows-2022
+#   - env: PUB_HOSTED_URL / FLUTTER_STORAGE_BASE_URL / GOPROXY / GOTOOLCHAIN / GRADLE_OPTS
+#   - setup: ./.github/actions/setup，with android: 'true'
+#   - SDK: platforms;android-36 / build-tools;36.0.0 / ndk;28.2.13676358
+#   - 构建: ./tool/build-android.ps1 -BuildConfig config/build.community.json -Unsigned
+#   - 校验: python tool/verify_apk.py --unsigned ...
+
+name: 探路-无签名构建
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      PUB_HOSTED_URL: https://pub.dev
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GOPROXY: https://proxy.golang.org,direct
+      GOTOOLCHAIN: go1.24.7
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          android: 'true'
+          windows-arm64: 'false'
+
+      - name: 环境快照
+        run: |
+          Write-Output "== 工作目录 =="
+          Get-Location
+          Write-Output "== 顶层文件 =="
+          Get-ChildItem | Select-Object -First 25 Name, Length
+          Write-Output "== tool 目录 =="
+          Get-ChildItem tool | Select-Object -First 30 Name
+          Write-Output "== 关键配置文件 =="
+          Get-ChildItem config | Select-Object Name
+          Write-Output "== flutter / dart / go =="
+          flutter --version
+          go version
+          Write-Output "== JAVA_HOME =="
+          Write-Output $env:JAVA_HOME
+          Write-Output "== ANDROID_HOME =="
+          Write-Output $env:ANDROID_HOME
+
+      - name: 安装固定版本安卓 SDK
+        run: |
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
+          & $sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          if ($LASTEXITCODE -ne 0) { throw '安卓 SDK 安装失败。' }
+
+      - name: 编译无签名 APK（上游原样命令）
+        run: ./tool/build-android.ps1 -BuildConfig config/build.community.json -Unsigned
+
+      - name: 列出产物
+        if: always()
+        run: |
+          if (Test-Path build/app/outputs/flutter-apk) {
+            Get-ChildItem -Recurse build/app/outputs/flutter-apk | Select-Object FullName, Length
+          } else { Write-Output '(没有 flutter-apk 目录)' }
+
+      - name: 校验 APK（上游原样命令）
+        if: always()
+        run: |
+          python tool/verify_apk.py `
+            --apk build/app/outputs/flutter-apk/app-release.apk `
+            --sdk $env:ANDROID_HOME `
+            --unsigned `
+            --application-id com.asterlink.app.community `
+            --umeng-channel community `
+            --output .local/ci-apk-inspection.json
+          Write-Output "verify_apk 退出码: $LASTEXITCODE"
+
+      - name: 上传产物
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656c7c1c4a8751dfc6a0a # v7
+        with:
+          name: probe-unsigned
+          path: |
+            build/app/outputs/flutter-apk/*.apk
+            .local/ci-apk-inspection.json
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7

@@ -89,7 +89,7 @@ jobs:
 
       - name: 上传产物
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656c7c1c4a8751dfc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: probe-unsigned
           path: |

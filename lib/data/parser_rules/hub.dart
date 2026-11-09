@@ -334,7 +334,7 @@ class ParserRuleHub extends ChangeNotifier {
   }
   static const buildUrl = String.fromEnvironment(
     'ASTERLINK_PARSER_HUB_URL',
-    defaultValue: BackendEndpoints.parser,
+    defaultValue: '',
   );
   static const buildKey = String.fromEnvironment('ASTERLINK_PARSER_HUB_KEY');
   static const buildPublicKey = String.fromEnvironment(
